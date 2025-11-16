@@ -98,6 +98,7 @@ impl TradeExecutor {
             amount_in_lamports,
             pool,
             true, // SOL -> Token
+            self.config.buy_slippage_bps, // 99% slippage para compra
         );
 
         info!("   📊 Amount in: {} lamports", amount_in_lamports);
@@ -145,6 +146,7 @@ impl TradeExecutor {
             amount,
             pool,
             false, // Token -> SOL
+            self.config.sell_slippage_bps, // 40% slippage para venta
         );
 
         // Cuentas de token
@@ -209,17 +211,17 @@ impl TradeExecutor {
     }
 
     /// Calcular minimum amount out con slippage protection
-    fn calculate_min_amount_out(&self, amount_in: u64, pool: &Pool, is_a_to_b: bool) -> u64 {
+    fn calculate_min_amount_out(&self, amount_in: u64, pool: &Pool, is_a_to_b: bool, slippage_bps: u16) -> u64 {
         // Estimar output usando precio del pool
         let estimated_out = PriceCalculator::estimate_swap_output(pool, amount_in, is_a_to_b);
 
         // Aplicar slippage tolerance
-        let slippage_multiplier = 1.0 - (self.config.max_slippage_bps as f64 / 10_000.0);
+        let slippage_multiplier = 1.0 - (slippage_bps as f64 / 10_000.0);
         let min_out = (estimated_out as f64 * slippage_multiplier) as u64;
 
         info!("   📈 Estimated output: {}", estimated_out);
         info!("   📉 Min output ({}% slippage): {}",
-            self.config.max_slippage_bps as f64 / 100.0,
+            slippage_bps as f64 / 100.0,
             min_out
         );
 

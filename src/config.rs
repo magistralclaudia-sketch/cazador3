@@ -22,7 +22,8 @@ pub struct Config {
     // Trading Configuration
     pub auto_buy_enabled: bool,
     pub auto_buy_amount_sol: f64,
-    pub max_slippage_bps: u16,
+    pub buy_slippage_bps: u16,
+    pub sell_slippage_bps: u16,
     pub priority_fee_lamports: u64,
 
     // Risk Management
@@ -46,7 +47,8 @@ impl Config {
             meteora_program_id: Pubkey::from_str(&std::env::var("METEORA_PROGRAM_ID")?)?,
             auto_buy_enabled: std::env::var("AUTO_BUY_ENABLED")?.parse()?,
             auto_buy_amount_sol: std::env::var("AUTO_BUY_AMOUNT_SOL")?.parse()?,
-            max_slippage_bps: std::env::var("MAX_SLIPPAGE_BPS")?.parse()?,
+            buy_slippage_bps: std::env::var("BUY_SLIPPAGE_BPS")?.parse()?,
+            sell_slippage_bps: std::env::var("SELL_SLIPPAGE_BPS")?.parse()?,
             priority_fee_lamports: std::env::var("PRIORITY_FEE_LAMPORTS")?.parse()?,
             take_profit_percent: std::env::var("TAKE_PROFIT_PERCENT")?.parse()?,
             stop_loss_percent: std::env::var("STOP_LOSS_PERCENT")?.parse()?,
