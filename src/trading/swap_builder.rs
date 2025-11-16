@@ -1,5 +1,6 @@
 use anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anyhow::{Context, Result};
+use sha2::{Sha256, Digest};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -123,14 +124,26 @@ impl SwapInstructionBuilder {
 
     /// Obtener discriminador de la instrucción swap
     ///
-    /// IMPORTANTE: Este discriminador es una aproximación
-    /// Para obtener el discriminador exacto:
-    /// 1. Usar `anchor idl fetch <program_id>`
-    /// 2. O calcularlo con: sha256("global:swap")[0..8]
+    /// Calcula el discriminador usando el método estándar de Anchor:
+    /// discriminador = sha256("global:swap")[0..8]
+    ///
+    /// Meteora DAMM v2 usa instrucciones Anchor, por lo que este método es correcto.
     fn get_swap_discriminator(&self) -> [u8; 8] {
-        // Discriminador común en programas Anchor para "swap"
-        // Esto puede variar, verificar con el IDL oficial
-        [0xf8, 0xc6, 0x9e, 0x91, 0xe1, 0x75, 0x87, 0xc8]
+        Self::calculate_anchor_discriminator("global", "swap")
+    }
+
+    /// Calcular discriminador Anchor para cualquier instrucción
+    ///
+    /// Anchor usa: sha256("namespace:instruction_name")[0..8]
+    fn calculate_anchor_discriminator(namespace: &str, name: &str) -> [u8; 8] {
+        let preimage = format!("{}:{}", namespace, name);
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let hash = hasher.finalize();
+
+        let mut discriminator = [0u8; 8];
+        discriminator.copy_from_slice(&hash[..8]);
+        discriminator
     }
 
     /// Versión simplificada del swap usando solo las cuentas esenciales

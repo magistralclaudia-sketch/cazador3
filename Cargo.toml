@@ -45,6 +45,16 @@ dotenv = "0.15"
 # Math for price calculations
 num-traits = "0.2"
 
+# SHA256 for calculating Anchor discriminators
+sha2 = "0.10"
+
+# Jito for MEV bundles
+jito-searcher-client = { version = "0.1", optional = true }
+
+[features]
+default = []
+jito = ["jito-searcher-client"]
+
 [patch.crates-io]
 # Patch para resolver conflictos de versiones en solana-sdk
 curve25519-dalek = "=3.2.1"

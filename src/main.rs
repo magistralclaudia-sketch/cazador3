@@ -4,6 +4,7 @@ mod meteora;
 mod trading;
 
 use anyhow::Result;
+use std::sync::Arc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -40,11 +41,11 @@ async fn main() -> Result<()> {
 
     // Crear trade executor
     info!("💼 Inicializando Trade Executor...");
-    let executor = TradeExecutor::new(config.clone()).await?;
+    let executor = Arc::new(TradeExecutor::new(config.clone()).await?);
     info!("✓ Wallet: {}", executor.get_wallet_pubkey());
 
-    // Crear position manager
-    let position_manager = PositionManager::new(config.clone(), executor);
+    // Crear position manager (clonamos el executor para pasar al manager)
+    let position_manager = PositionManager::new(config.clone(), executor.as_ref().clone());
 
     // Crear Geyser client
     info!("🔌 Conectando a Geyser gRPC...");
@@ -55,8 +56,8 @@ async fn main() -> Result<()> {
     info!("🚀 Iniciando monitoreo de pools Meteora DAMM V2...");
     let pool_rx = geyser_monitor.monitor_pools().await?;
 
-    // Ejecutar bot principal
-    run_sniper_bot(config, pool_rx, position_manager).await?;
+    // Ejecutar bot principal (pasar el executor ya creado)
+    run_sniper_bot(config, pool_rx, position_manager, executor).await?;
 
     Ok(())
 }
@@ -65,13 +66,12 @@ async fn run_sniper_bot(
     config: Config,
     mut pool_rx: tokio::sync::mpsc::UnboundedReceiver<PoolEvent>,
     mut position_manager: PositionManager,
+    executor: Arc<TradeExecutor>,  // ⚡ Recibir executor en lugar de crear uno nuevo
 ) -> Result<()> {
     info!("🎯 BOT DE SNIPER ACTIVO");
     info!("========================================");
     info!("Esperando nuevos pools...");
     info!("");
-
-    let executor = TradeExecutor::new(config.clone()).await?;
 
     while let Some(event) = pool_rx.recv().await {
         match event {
@@ -93,55 +93,66 @@ async fn handle_new_pool(
     position_manager: &mut PositionManager,
     pool_info: PoolInfo,
 ) {
-    info!("");
-    info!("🆕 ═══════════════════════════════════════");
-    info!("   NUEVO POOL DETECTADO!");
-    info!("═══════════════════════════════════════");
-    info!("📍 Address: {}", pool_info.address);
-    info!("🪙 Token A: {}", pool_info.pool.token_a_mint);
-    info!("🪙 Token B: {}", pool_info.pool.token_b_mint);
-    info!("💧 Liquidez: {}", pool_info.pool.liquidity);
-
-    let price = PriceCalculator::calculate_price(&pool_info.pool);
-    info!("💰 Precio: {}", price);
-
-    // Verificar liquidez mínima
+    // ⚡ OPTIMIZACIÓN: Verificaciones rápidas SIN logs
     let min_liquidity = (config.min_liquidity_sol * 1_000_000_000.0) as u128;
-    if pool_info.pool.liquidity < min_liquidity {
-        warn!("⚠️  Liquidez insuficiente. Mínimo: {} SOL", config.min_liquidity_sol);
-        return;
-    }
+    let should_buy = config.auto_buy_enabled && pool_info.pool.liquidity >= min_liquidity;
 
-    // Auto-compra si está habilitada
-    if config.auto_buy_enabled {
-        info!("🎯 EJECUTANDO AUTO-COMPRA...");
-
+    if should_buy {
+        // ⚡ COMPRAR INMEDIATAMENTE - Sin calcular precio ni loggear
         match executor.snipe_buy(&pool_info.address, &pool_info.pool).await {
             Ok(signature) => {
-                info!("✅ ¡COMPRA EXITOSA!");
-                info!("📝 Signature: {}", signature);
+                // ✅ DESPUÉS de comprar, loggear TODO
+                let price = PriceCalculator::calculate_price(&pool_info.pool);
 
-                // Agregar posición al position manager
+                info!("");
+                info!("🆕 ═══════════════════════════════════════");
+                info!("   ✅ COMPRA EXITOSA!");
+                info!("═══════════════════════════════════════");
+                info!("📍 Pool: {}", pool_info.address);
+                info!("📝 Signature: {}", signature);
+                info!("💰 Precio: {:.8}", price);
+                info!("💵 Monto: {} SOL", config.auto_buy_amount_sol);
+                info!("🪙 Token A: {}", pool_info.pool.token_a_mint);
+                info!("🪙 Token B: {}", pool_info.pool.token_b_mint);
+                info!("💧 Liquidez: {}", pool_info.pool.liquidity);
+                info!("═══════════════════════════════════════");
+                info!("");
+
+                // Agregar posición
                 let amount = (config.auto_buy_amount_sol * 1_000_000_000.0) as u64;
                 let position = Position::new(
                     pool_info.address,
                     price,
                     amount,
-                    pool_info.pool.token_b_mint, // Asumiendo que compramos token B
+                    pool_info.pool.token_b_mint,
                 );
-
                 position_manager.add_position(position);
             }
             Err(e) => {
-                error!("❌ Error en compra: {:?}", e);
+                error!("");
+                error!("❌ ERROR EN COMPRA");
+                error!("📍 Pool: {}", pool_info.address);
+                error!("Error: {:?}", e);
+                error!("");
             }
         }
     } else {
-        info!("ℹ️  Auto-compra deshabilitada. Solo monitoreando.");
+        // Solo observación - aquí sí podemos loggear
+        if !config.auto_buy_enabled {
+            let price = PriceCalculator::calculate_price(&pool_info.pool);
+            info!("");
+            info!("🆕 Pool detectado (solo observación): {}", pool_info.address);
+            info!("   💰 Precio: {:.8}", price);
+            info!("   💧 Liquidez: {}", pool_info.pool.liquidity);
+            info!("");
+        } else if pool_info.pool.liquidity < min_liquidity {
+            info!("⚠️  Pool {} ignorado: liquidez insuficiente ({} < {})",
+                pool_info.address,
+                pool_info.pool.liquidity,
+                min_liquidity
+            );
+        }
     }
-
-    info!("═══════════════════════════════════════");
-    info!("");
 }
 
 async fn handle_pool_update(

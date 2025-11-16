@@ -14,6 +14,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::meteora::{Pool, PriceCalculator};
+use super::blockhash_cache::BlockhashCache;
 use super::swap_builder::{SwapInstructionBuilder, get_associated_token_address};
 use super::transaction_confirmer::TransactionConfirmer;
 
@@ -31,6 +32,7 @@ pub struct TradeExecutor {
     wallet: Arc<Keypair>,
     swap_builder: SwapInstructionBuilder,
     tx_confirmer: TransactionConfirmer,
+    blockhash_cache: Arc<BlockhashCache>,
 }
 
 impl TradeExecutor {
@@ -54,12 +56,29 @@ impl TradeExecutor {
             30, // 30 segundos de timeout
         );
 
+        // ⚡ Blockhash cache con auto-refresh cada 500ms
+        let blockhash_cache = Arc::new(BlockhashCache::new(
+            config.rpc_url.clone(),
+            500, // Refresh cada 500ms
+        ));
+
+        // Iniciar background task de auto-refresh
+        let cache_clone = blockhash_cache.clone();
+        tokio::spawn(async move {
+            cache_clone.auto_refresh_loop().await;
+        });
+
+        // Obtener primer blockhash
+        blockhash_cache.force_refresh().await?;
+        info!("✓ Blockhash cache inicializado con auto-refresh");
+
         Ok(Self {
             config,
             rpc_client,
             wallet,
             swap_builder,
             tx_confirmer,
+            blockhash_cache,
         })
     }
 
@@ -77,6 +96,7 @@ impl TradeExecutor {
     /// 🎯 SNIPE BUY - Compra ultra-rápida en nuevo pool
     ///
     /// Optimizaciones:
+    /// - Creación automática de ATA si no existe
     /// - Skip preflight para máxima velocidad
     /// - Priority fees altos
     /// - Confirmación agresiva
@@ -86,13 +106,7 @@ impl TradeExecutor {
         pool_address: &Pubkey,
         pool: &Pool,
     ) -> Result<Signature> {
-        info!("🎯 EJECUTANDO SNIPE BUY en pool {}", pool_address);
-
-        let price = PriceCalculator::calculate_price(pool);
-        info!("   💰 Precio actual: {:.6}", price);
-        info!("   💵 Monto: {} SOL", self.config.auto_buy_amount_sol);
-
-        // Calcular amounts
+        // Calcular amounts (SIN logs para velocidad)
         let amount_in_lamports = (self.config.auto_buy_amount_sol * 1_000_000_000.0) as u64;
         let minimum_amount_out = self.calculate_min_amount_out(
             amount_in_lamports,
@@ -101,21 +115,16 @@ impl TradeExecutor {
             self.config.buy_slippage_bps, // 99% slippage para compra
         );
 
-        info!("   📊 Amount in: {} lamports", amount_in_lamports);
-        info!("   📉 Min amount out: {}", minimum_amount_out);
-
-        // Obtener o crear cuentas de token
+        // Obtener cuentas
         let user_sol_account = self.wallet.pubkey();
         let user_token_account = get_associated_token_address(
             &self.wallet.pubkey(),
-            &pool.token_b_mint, // Asumiendo que compramos token B con SOL (token A)
+            &pool.token_b_mint,
         );
 
-        info!("   👤 User: {}", user_sol_account);
-        info!("   🪙 Token account: {}", user_token_account);
-
-        // TODO: Verificar si la cuenta de token existe, si no, crear ATA
-        // Por ahora asumimos que existe o se creará automáticamente
+        // ⚡ CRÍTICO: Verificar y crear ATA si no existe
+        // Esto DEBE hacerse antes del swap o fallará
+        self.ensure_ata_exists(&pool.token_b_mint).await?;
 
         // Construir instrucción de swap
         let swap_ix = self.swap_builder.build_simple_swap_instruction(
@@ -128,8 +137,54 @@ impl TradeExecutor {
             minimum_amount_out,
         )?;
 
-        // Construir y enviar transacción
+        // Ejecutar transacción ultra-rápida
         self.execute_swap_transaction(swap_ix, "COMPRA").await
+    }
+
+    /// Asegurar que la Associated Token Account existe
+    ///
+    /// Si no existe, la crea en una transacción separada.
+    /// Esto es CRÍTICO para que el swap no falle.
+    async fn ensure_ata_exists(&self, mint: &Pubkey) -> Result<()> {
+        let ata = get_associated_token_address(&self.wallet.pubkey(), mint);
+
+        // Verificar si ya existe
+        match self.rpc_client.get_account(&ata).await {
+            Ok(_) => {
+                // ATA existe, todo bien
+                Ok(())
+            }
+            Err(_) => {
+                // ATA no existe, necesitamos crearla
+                // IMPORTANTE: Esto agrega ~500ms, pero es necesario
+
+                let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
+                    &self.wallet.pubkey(),  // payer
+                    &self.wallet.pubkey(),  // wallet
+                    mint,                   // mint
+                    &spl_token::id(),       // token program
+                );
+
+                // ⚡ Obtener blockhash del cache (ultra rápido)
+                let blockhash = self.blockhash_cache.get_blockhash().await?;
+
+                // Crear y firmar transacción
+                let create_tx = Transaction::new_signed_with_payer(
+                    &[create_ata_ix],
+                    Some(&self.wallet.pubkey()),
+                    &[&*self.wallet],
+                    blockhash,
+                );
+
+                // Enviar y confirmar
+                self.tx_confirmer
+                    .send_and_confirm_ultra_fast(&create_tx)
+                    .await
+                    .context("Failed to create ATA")?;
+
+                Ok(())
+            }
+        }
     }
 
     /// 💸 SELL - Venta ultra-rápida
@@ -184,8 +239,8 @@ impl TradeExecutor {
 
         let compute_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(300_000);
 
-        // Obtener blockhash reciente
-        let recent_blockhash = self.tx_confirmer.get_latest_blockhash().await?;
+        // ⚡ Obtener blockhash del cache (ahorra 10-50ms)
+        let recent_blockhash = self.blockhash_cache.get_blockhash().await?;
 
         // Construir transacción
         let tx = Transaction::new_signed_with_payer(
@@ -195,17 +250,11 @@ impl TradeExecutor {
             recent_blockhash,
         );
 
-        info!("📤 Enviando transacción de {}...", operation_name);
-        info!("   ⚡ Priority fee: {} lamports", self.config.priority_fee_lamports);
-        info!("   💻 Compute limit: 300,000 units");
-
-        // Enviar y confirmar con máxima velocidad
+        // ⚡ Enviar y confirmar con máxima velocidad (sin logs para velocidad)
         let signature = self.tx_confirmer
             .send_with_retries(&tx)
             .await
             .context(format!("Failed to execute {}", operation_name))?;
-
-        info!("✅ {} exitosa! Signature: {}", operation_name, signature);
 
         Ok(signature)
     }

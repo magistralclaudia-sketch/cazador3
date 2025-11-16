@@ -93,11 +93,14 @@ impl TransactionConfirmer {
                 ));
             }
 
-            // Obtener estado de la transacción
+            // ⚡ Obtener estado con commitment "processed" para máxima velocidad
+            // "processed" = confirmado por el leader actual (~200ms)
+            // "confirmed" = >66% validators (~1-2 segundos)
+            // Para sniper bot, processed es suficiente para ganar velocidad
             match self.rpc_client
                 .get_signature_status_with_commitment(
                     &signature,
-                    CommitmentConfig::confirmed(),
+                    CommitmentConfig::processed(),  // ⚡ Cambio crítico para velocidad
                 )
                 .await
             {
