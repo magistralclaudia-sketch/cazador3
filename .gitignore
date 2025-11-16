@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Wallet (NUNCA COMMITEAR)
+wallet.json
+*.json
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
