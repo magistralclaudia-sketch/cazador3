@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use borsh::{BorshSerialize, BorshDeserialize};
 use sha2::{Sha256, Digest};
+use std::str::FromStr;
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -124,12 +125,13 @@ impl SwapInstructionBuilder {
 
     /// Obtener discriminador de la instrucción swap
     ///
-    /// Calcula el discriminador usando el método estándar de Anchor:
-    /// discriminador = sha256("global:swap")[0..8]
+    /// Discriminador exacto obtenido del IDL oficial de Meteora DAMM V2:
+    /// https://solscan.io/account/cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG
     ///
-    /// Meteora DAMM v2 usa instrucciones Anchor, por lo que este método es correcto.
+    /// ✅ VERIFICADO: [248, 198, 158, 145, 225, 117, 135, 200]
     fn get_swap_discriminator(&self) -> [u8; 8] {
-        Self::calculate_anchor_discriminator("global", "swap")
+        // Discriminador exacto del IDL oficial
+        [248, 198, 158, 145, 225, 117, 135, 200]
     }
 
     /// Calcular discriminador Anchor para cualquier instrucción
@@ -169,11 +171,10 @@ impl SwapInstructionBuilder {
         let mut data = discriminator.to_vec();
         params.serialize(&mut data)?;
 
-        // Derivar pool_authority PDA
-        let (pool_authority, _) = Pubkey::find_program_address(
-            &[b"authority", pool_address.as_ref()],
-            &self.program_id,
-        );
+        // Pool authority es una dirección FIJA (no un PDA derivado)
+        // Valor del IDL oficial: HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC
+        let pool_authority = Pubkey::from_str("HLnpSz9h2S4hiLQ43rnSD9XkcUThA7B8hQMKmDaiTLcC")
+            .expect("Invalid pool authority address");
 
         // Derivar event_authority PDA
         let (event_authority, _) = Pubkey::find_program_address(
