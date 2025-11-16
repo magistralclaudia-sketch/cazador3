@@ -93,16 +93,37 @@ impl PositionManager {
             let current_price = PriceCalculator::calculate_price(&pool_info.pool);
             let pnl = position.calculate_pnl(current_price);
 
-            info!("📈 Pool {}: PnL = {:.2}%", pool_info.address, pnl);
+            info!("📈 Pool {}: PnL = {:.2}% | Entry: {:.8} → Current: {:.8}",
+                pool_info.address, pnl, position.entry_price, current_price);
 
             // Verificar Take Profit
             if position.should_take_profit(current_price, self.config.take_profit_percent) {
-                info!("🎉 ¡TAKE PROFIT! PnL = {:.2}%", pnl);
+                info!("");
+                info!("🎉 ═══════════════════════════════════════");
+                info!("   TAKE PROFIT ACTIVADO!");
+                info!("═══════════════════════════════════════");
+                info!("📍 Pool: {}", pool_info.address);
+                info!("💰 PnL: {:.2}%", pnl);
+                info!("📊 Precio entrada: {:.8}", position.entry_price);
+                info!("📊 Precio actual: {:.8}", current_price);
+                info!("🎯 Target TP: {:.2}%", self.config.take_profit_percent);
+                info!("═══════════════════════════════════════");
+                info!("");
                 self.execute_sell(pool_info, &position, "Take Profit").await?;
             }
             // Verificar Stop Loss
             else if position.should_stop_loss(current_price, self.config.stop_loss_percent) {
-                warn!("🛑 STOP LOSS activado. PnL = {:.2}%", pnl);
+                warn!("");
+                warn!("🛑 ═══════════════════════════════════════");
+                warn!("   STOP LOSS ACTIVADO!");
+                warn!("═══════════════════════════════════════");
+                warn!("📍 Pool: {}", pool_info.address);
+                warn!("💰 PnL: {:.2}%", pnl);
+                warn!("📊 Precio entrada: {:.8}", position.entry_price);
+                warn!("📊 Precio actual: {:.8}", current_price);
+                warn!("🛑 Límite SL: {:.2}%", self.config.stop_loss_percent);
+                warn!("═══════════════════════════════════════");
+                warn!("");
                 self.execute_sell(pool_info, &position, "Stop Loss").await?;
             }
         }
@@ -117,7 +138,9 @@ impl PositionManager {
         position: &Position,
         reason: &str,
     ) -> Result<()> {
-        info!("💸 Ejecutando venta: {}", reason);
+        info!("💸 Iniciando venta: {}", reason);
+        info!("   Pool: {}", pool_info.address);
+        info!("   Cantidad: {} tokens", position.amount);
 
         match self.executor.sell(
             &pool_info.address,
@@ -125,12 +148,29 @@ impl PositionManager {
             position.amount,
         ).await {
             Ok(signature) => {
-                info!("✅ Venta exitosa! Signature: {}", signature);
+                info!("");
+                info!("✅ ═══════════════════════════════════════");
+                info!("   VENTA EXITOSA!");
+                info!("═══════════════════════════════════════");
+                info!("📍 Pool: {}", pool_info.address);
+                info!("📝 Signature: {}", signature);
+                info!("💼 Razón: {}", reason);
+                info!("═══════════════════════════════════════");
+                info!("");
                 self.remove_position(&pool_info.address);
                 Ok(())
             }
             Err(e) => {
-                warn!("❌ Error al vender: {:?}", e);
+                warn!("");
+                warn!("❌ ═══════════════════════════════════════");
+                warn!("   ERROR EN VENTA (posición permanece)");
+                warn!("═══════════════════════════════════════");
+                warn!("📍 Pool: {}", pool_info.address);
+                warn!("💼 Razón: {}", reason);
+                warn!("❌ Error: {:?}", e);
+                warn!("⚠️  La posición sigue activa, se reintentará");
+                warn!("═══════════════════════════════════════");
+                warn!("");
                 Err(e)
             }
         }

@@ -127,7 +127,8 @@ impl TradeExecutor {
         pool_address: &Pubkey,
         pool: &Pool,
     ) -> Result<Signature> {
-        // Calcular amounts (SIN logs para velocidad)
+        info!("   [1/4] Calculando amounts...");
+        // Calcular amounts
         let amount_in_lamports = (self.config.auto_buy_amount_sol * 1_000_000_000.0) as u64;
         let minimum_amount_out = self.calculate_min_amount_out(
             amount_in_lamports,
@@ -135,6 +136,7 @@ impl TradeExecutor {
             true, // SOL -> Token
             self.config.buy_slippage_bps, // 99% slippage para compra
         );
+        info!("      In: {} lamports, Min out: {}", amount_in_lamports, minimum_amount_out);
 
         // Obtener cuentas
         let user_sol_account = self.wallet.pubkey();
@@ -142,11 +144,13 @@ impl TradeExecutor {
             &self.wallet.pubkey(),
             &pool.token_b_mint,
         );
+        info!("      Token account: {}", user_token_account);
 
+        info!("   [2/4] Verificando/creando ATA...");
         // ⚡ CRÍTICO: Verificar y crear ATA si no existe
-        // Esto DEBE hacerse antes del swap o fallará
         self.ensure_ata_exists(&pool.token_b_mint).await?;
 
+        info!("   [3/4] Construyendo swap instruction (14 cuentas)...");
         // ⚡ Construir instrucción de swap CON TODAS LAS CUENTAS REQUERIDAS (14)
         let swap_ix = self.swap_builder.build_complete_swap_instruction(
             pool_address,
@@ -157,7 +161,9 @@ impl TradeExecutor {
             amount_in_lamports,
             minimum_amount_out,
         )?;
+        info!("      ✅ Instruction construida correctamente");
 
+        info!("   [4/4] Ejecutando transacción...");
         // Ejecutar transacción ultra-rápida
         self.execute_swap_transaction(swap_ix, "COMPRA").await
     }
@@ -168,16 +174,18 @@ impl TradeExecutor {
     /// Esto es CRÍTICO para que el swap no falle.
     async fn ensure_ata_exists(&self, mint: &Pubkey) -> Result<()> {
         let ata = get_associated_token_address(&self.wallet.pubkey(), mint);
+        info!("      Verificando ATA: {}", ata);
 
         // Verificar si ya existe
         match self.rpc_client.get_account(&ata).await {
             Ok(_) => {
                 // ATA existe, todo bien
+                info!("      ✅ ATA ya existe");
                 Ok(())
             }
             Err(_) => {
                 // ATA no existe, necesitamos crearla
-                // IMPORTANTE: Esto agrega ~500ms, pero es necesario
+                info!("      ⚠️  ATA no existe, creando... (~500ms)");
 
                 let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
                     &self.wallet.pubkey(),  // payer
@@ -197,12 +205,14 @@ impl TradeExecutor {
                     blockhash,
                 );
 
+                info!("      Enviando transacción de creación de ATA...");
                 // Enviar y confirmar
                 self.tx_confirmer
                     .send_and_confirm_ultra_fast(&create_tx)
                     .await
                     .context("Failed to create ATA")?;
 
+                info!("      ✅ ATA creada exitosamente");
                 Ok(())
             }
         }
@@ -216,15 +226,17 @@ impl TradeExecutor {
         amount: u64,
     ) -> Result<Signature> {
         info!("💸 EJECUTANDO VENTA en pool {}", pool_address);
-        info!("   📊 Cantidad: {}", amount);
 
+        info!("   [1/3] Calculando amounts...");
         let minimum_amount_out = self.calculate_min_amount_out(
             amount,
             pool,
             false, // Token -> SOL
-            self.config.sell_slippage_bps, // 40% slippage para venta
+            self.config.sell_slippage_bps, // 30% slippage para venta
         );
+        info!("      In: {} tokens, Min out: {} lamports", amount, minimum_amount_out);
 
+        info!("   [2/3] Construyendo swap instruction (14 cuentas)...");
         // Cuentas de token
         let user_token_account = get_associated_token_address(
             &self.wallet.pubkey(),
@@ -242,8 +254,10 @@ impl TradeExecutor {
             amount,
             minimum_amount_out,
         )?;
+        info!("      ✅ Instruction construida correctamente");
 
         // Ejecutar transacción
+        info!("   [3/3] Ejecutando transacción...");
         self.execute_swap_transaction(swap_ix, "VENTA").await
     }
 

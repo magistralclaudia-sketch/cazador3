@@ -96,12 +96,19 @@ async fn handle_new_pool(
     position_manager: &mut PositionManager,
     pool_info: PoolInfo,
 ) {
-    // ⚡ OPTIMIZACIÓN: Verificaciones rápidas SIN logs
+    info!("🔔 Pool detectado: {}", pool_info.address);
+    info!("   Token A: {}", pool_info.pool.token_a_mint);
+    info!("   Token B: {}", pool_info.pool.token_b_mint);
+    info!("   Liquidez: {}", pool_info.pool.liquidity);
+
+    // ⚡ Verificaciones rápidas
     let min_liquidity = (config.min_liquidity_sol * 1_000_000_000.0) as u128;
     let should_buy = config.auto_buy_enabled && pool_info.pool.liquidity >= min_liquidity;
 
     if should_buy {
-        // ⚡ COMPRAR INMEDIATAMENTE - Sin calcular precio ni loggear
+        info!("⚡ Iniciando compra automática...");
+
+        // ⚡ COMPRAR INMEDIATAMENTE
         match executor.snipe_buy(&pool_info.address, &pool_info.pool).await {
             Ok(signature) => {
                 // ✅ DESPUÉS de comprar, loggear TODO
@@ -130,12 +137,20 @@ async fn handle_new_pool(
                     pool_info.pool.token_b_mint,
                 );
                 position_manager.add_position(position);
+                info!("✅ Posición agregada al tracker");
             }
             Err(e) => {
                 error!("");
-                error!("❌ ERROR EN COMPRA");
+                error!("❌ ═══════════════════════════════════════");
+                error!("   ERROR EN COMPRA (BOT CONTINÚA)");
+                error!("═══════════════════════════════════════");
                 error!("📍 Pool: {}", pool_info.address);
-                error!("Error: {:?}", e);
+                error!("🪙 Token A: {}", pool_info.pool.token_a_mint);
+                error!("🪙 Token B: {}", pool_info.pool.token_b_mint);
+                error!("💧 Liquidez: {}", pool_info.pool.liquidity);
+                error!("❌ Error: {:?}", e);
+                error!("═══════════════════════════════════════");
+                error!("🔄 Bot continúa monitoreando nuevos pools...");
                 error!("");
             }
         }
@@ -143,17 +158,15 @@ async fn handle_new_pool(
         // Solo observación - aquí sí podemos loggear
         if !config.auto_buy_enabled {
             let price = PriceCalculator::calculate_price(&pool_info.pool);
-            info!("");
-            info!("🆕 Pool detectado (solo observación): {}", pool_info.address);
             info!("   💰 Precio: {:.8}", price);
-            info!("   💧 Liquidez: {}", pool_info.pool.liquidity);
+            info!("   ⚠️  Auto-buy DESHABILITADO (solo observación)");
             info!("");
         } else if pool_info.pool.liquidity < min_liquidity {
-            info!("⚠️  Pool {} ignorado: liquidez insuficiente ({} < {})",
-                pool_info.address,
+            info!("   ⚠️  Liquidez insuficiente: {} < {} (ignorado)",
                 pool_info.pool.liquidity,
                 min_liquidity
             );
+            info!("");
         }
     }
 }
@@ -169,9 +182,9 @@ async fn handle_pool_update(
 
         info!("📊 Pool actualizado: {} | PnL: {:.2}%", pool_info.address, pnl);
 
-        // Verificar TP/SL
+        // Verificar TP/SL - NUNCA detener el bot por errores aquí
         if let Err(e) = position_manager.check_positions(&pool_info).await {
-            error!("Error checking positions: {:?}", e);
+            error!("⚠️  Error verificando TP/SL (bot continúa): {:?}", e);
         }
     }
 }
