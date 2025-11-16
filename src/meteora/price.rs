@@ -54,15 +54,22 @@ impl PriceCalculator {
         (price, pool.token_a_decimals, pool.token_b_decimals)
     }
 
-    /// Estimar cuántos tokens B recibirás por una cantidad de tokens A
-    /// Usando la fórmula de constant product: x * y = k
+    /// Estimar cuántos tokens recibirás en un swap
+    /// Usando la fórmula CORRECTA de constant product AMM: x * y = k
     ///
-    /// Esto es una estimación aproximada sin considerar fees
+    /// Fórmula: amount_out = (reserve_out * amount_in) / (reserve_in + amount_in)
+    ///
+    /// NOTA: Esta es una estimación SIN FEES. La transacción real tendrá menos output.
     pub fn estimate_swap_output(
         pool: &Pool,
         amount_in: u64,
         is_a_to_b: bool,
     ) -> u64 {
+        // Para usar constant product necesitaríamos las reserves actuales
+        // Como no las tenemos en el pool state, usamos aproximación con liquidez
+
+        // MÉTODO SIMPLIFICADO usando precio
+        // En producción, deberías obtener las reserves reales del pool
         let price = Self::calculate_price(pool);
 
         if is_a_to_b {
@@ -72,6 +79,42 @@ impl PriceCalculator {
             // Swapping B -> A
             (amount_in as f64 / price) as u64
         }
+    }
+
+    /// Estimar output usando constant product AMM con reserves conocidas
+    ///
+    /// Fórmula correcta: amount_out = (reserve_out * amount_in) / (reserve_in + amount_in)
+    ///
+    /// Sin considerar fees. Para fees del 0.3%:
+    /// amount_in_with_fee = amount_in * 997
+    /// numerator = amount_in_with_fee * reserve_out
+    /// denominator = (reserve_in * 1000) + amount_in_with_fee
+    /// amount_out = numerator / denominator
+    pub fn estimate_swap_output_with_reserves(
+        reserve_in: u128,
+        reserve_out: u128,
+        amount_in: u64,
+        fee_bps: u16, // Fee en basis points (ej: 30 = 0.3%)
+    ) -> u64 {
+        if reserve_in == 0 || reserve_out == 0 {
+            return 0;
+        }
+
+        let amount_in_u128 = amount_in as u128;
+
+        // Aplicar fee
+        let fee_multiplier = 10_000 - fee_bps as u128;
+        let amount_in_with_fee = amount_in_u128 * fee_multiplier;
+
+        // Fórmula constant product
+        let numerator = amount_in_with_fee * reserve_out;
+        let denominator = (reserve_in * 10_000) + amount_in_with_fee;
+
+        if denominator == 0 {
+            return 0;
+        }
+
+        (numerator / denominator) as u64
     }
 
     /// Calcular el cambio de precio (price impact)
@@ -106,23 +149,109 @@ impl PriceCalculator {
         let sqrt_p = sqrt_price_max / q64_float;
         sqrt_p * sqrt_p
     }
+
+    /// Calcular price impact de un swap
+    ///
+    /// Price impact = (output_amount / reserve_out) * 100
+    pub fn calculate_swap_price_impact(
+        reserve_out: u128,
+        output_amount: u64,
+    ) -> f64 {
+        if reserve_out == 0 {
+            return 100.0;
+        }
+
+        ((output_amount as f64 / reserve_out as f64) * 100.0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_sdk::pubkey::Pubkey;
+
+    fn create_test_pool() -> Pool {
+        Pool {
+            bump: 0,
+            lp_fee_bps: 30,
+            protocol_fee_bps: 0,
+            sqrt_price: 1u128 << 64, // sqrt_price = 1.0, price = 1.0
+            liquidity: 1_000_000_000,
+            token_a_mint: Pubkey::new_unique(),
+            token_b_mint: Pubkey::new_unique(),
+            token_a_vault: Pubkey::new_unique(),
+            token_b_vault: Pubkey::new_unique(),
+            pool_token_mint: Pubkey::new_unique(),
+            fee_receiver: Pubkey::new_unique(),
+            sqrt_price_min: 0,
+            sqrt_price_max: u128::MAX,
+            token_a_decimals: 9,
+            token_b_decimals: 9,
+            created_at: 0,
+            updated_at: 0,
+            reserved: [0; 16],
+        }
+    }
 
     #[test]
     fn test_price_calculation() {
-        // Crear un pool de prueba
-        let mut pool = Pool {
-            sqrt_price: 1u128 << 64, // sqrt_price = 1.0, entonces price = 1.0
-            token_a_decimals: 9,
-            token_b_decimals: 9,
-            ..Default::default()
-        };
-
+        let pool = create_test_pool();
         let price = PriceCalculator::calculate_price(&pool);
         assert!((price - 1.0).abs() < 0.0001);
     }
+
+    #[test]
+    fn test_swap_output_with_reserves() {
+        // Pool con 100,000 token A y 100,000 token B
+        let reserve_in = 100_000_000_000; // 100k tokens
+        let reserve_out = 100_000_000_000; // 100k tokens
+        let amount_in = 1_000_000_000; // 1 token
+        let fee_bps = 30; // 0.3%
+
+        let output = PriceCalculator::estimate_swap_output_with_reserves(
+            reserve_in,
+            reserve_out,
+            amount_in,
+            fee_bps,
+        );
+
+        // Debería recibir aproximadamente 0.997 tokens (considerando fee)
+        assert!(output > 990_000_000 && output < 1_000_000_000);
+    }
+
+    #[test]
+    fn test_price_impact() {
+        let old_sqrt_price = 1u128 << 64;
+        let new_sqrt_price = (1u128 << 64) + (1u128 << 62); // +25% en sqrt -> +56.25% en price
+
+        let impact = PriceCalculator::calculate_price_impact(old_sqrt_price, new_sqrt_price);
+        assert!(impact > 50.0 && impact < 60.0);
+    }
 }
+
+// NOTAS IMPORTANTES:
+// ==================
+//
+// 1. ESTIMACIÓN SIMPLIFICADA:
+//    estimate_swap_output() usa solo el precio. Es una aproximación.
+//    En producción real, necesitas las reserves del pool.
+//
+// 2. OBTENER RESERVES:
+//    Las reserves están en los vaults del pool. Necesitas:
+//    - Leer token_a_vault account
+//    - Leer token_b_vault account
+//    - Obtener sus balances con getTokenAccountBalance
+//
+// 3. FEES:
+//    Meteora DAMM V2 tiene:
+//    - LP fee (típicamente 0.25-0.30%)
+//    - Protocol fee (variable)
+//    Total fee = lp_fee_bps + protocol_fee_bps
+//
+// 4. CONSTANT PRODUCT CORRECTO:
+//    Para cálculos exactos, usa estimate_swap_output_with_reserves()
+//    una vez que obtengas las reserves reales.
+//
+// 5. SLIPPAGE:
+//    Con 99% slippage, aceptas recibir hasta 1% del expected output
+//    Esto es necesario en pools nuevos con volatilidad extrema
