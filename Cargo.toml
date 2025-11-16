@@ -9,6 +9,10 @@ solana-sdk = "2.0"
 solana-client = "2.0"
 solana-transaction-status = "2.0"
 
+# SPL Token
+spl-token = "6.0"
+spl-associated-token-account = "5.0"
+
 # Yellowstone gRPC for fastest pool monitoring
 yellowstone-grpc-client = "10.1"
 yellowstone-grpc-proto = "10.1"

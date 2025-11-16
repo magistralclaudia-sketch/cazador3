@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
     // Crear trade executor
     info!("💼 Inicializando Trade Executor...");
-    let executor = TradeExecutor::new(config.clone())?;
+    let executor = TradeExecutor::new(config.clone()).await?;
     info!("✓ Wallet: {}", executor.get_wallet_pubkey());
 
     // Crear position manager
@@ -71,7 +71,7 @@ async fn run_sniper_bot(
     info!("Esperando nuevos pools...");
     info!("");
 
-    let executor = TradeExecutor::new(config.clone())?;
+    let executor = TradeExecutor::new(config.clone()).await?;
 
     while let Some(event) = pool_rx.recv().await {
         match event {
