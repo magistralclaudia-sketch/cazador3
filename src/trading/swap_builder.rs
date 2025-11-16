@@ -1,5 +1,5 @@
-use anchor_lang::{AnchorDeserialize, AnchorSerialize};
 use anyhow::{Context, Result};
+use borsh::{BorshSerialize, BorshDeserialize};
 use sha2::{Sha256, Digest};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -9,7 +9,7 @@ use solana_sdk::{
 use crate::meteora::Pool;
 
 /// Parámetros para swap en Meteora DAMM V2
-#[derive(AnchorSerialize, AnchorDeserialize, Debug, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub struct SwapParameters {
     /// Cantidad exacta de entrada
     pub amount_in: u64,
@@ -146,10 +146,99 @@ impl SwapInstructionBuilder {
         discriminator
     }
 
+    /// Versión COMPLETA del swap con todas las 14 cuentas requeridas
+    ///
+    /// Basado en la estructura oficial de Meteora DAMM V2 (Shyft + SDK oficial)
+    pub fn build_complete_swap_instruction(
+        &self,
+        pool_address: &Pubkey,
+        pool: &Pool,
+        user: &Pubkey,
+        user_source_token: &Pubkey,
+        user_destination_token: &Pubkey,
+        amount_in: u64,
+        minimum_amount_out: u64,
+    ) -> Result<Instruction> {
+        let discriminator = self.get_swap_discriminator();
+
+        let params = SwapParameters {
+            amount_in,
+            minimum_amount_out,
+        };
+
+        let mut data = discriminator.to_vec();
+        params.serialize(&mut data)?;
+
+        // Derivar pool_authority PDA
+        let (pool_authority, _) = Pubkey::find_program_address(
+            &[b"authority", pool_address.as_ref()],
+            &self.program_id,
+        );
+
+        // Derivar event_authority PDA
+        let (event_authority, _) = Pubkey::find_program_address(
+            &[b"__event_authority"],
+            &self.program_id,
+        );
+
+        // Las 14 cuentas requeridas en ORDEN EXACTO
+        let accounts = vec![
+            // 0. pool_authority (PDA)
+            AccountMeta::new_readonly(pool_authority, false),
+
+            // 1. pool
+            AccountMeta::new(*pool_address, false),
+
+            // 2. input_token_account (user source)
+            AccountMeta::new(*user_source_token, false),
+
+            // 3. output_token_account (user destination)
+            AccountMeta::new(*user_destination_token, false),
+
+            // 4. token_a_vault
+            AccountMeta::new(pool.token_a_vault, false),
+
+            // 5. token_b_vault
+            AccountMeta::new(pool.token_b_vault, false),
+
+            // 6. token_a_mint
+            AccountMeta::new_readonly(pool.token_a_mint, false),
+
+            // 7. token_b_mint
+            AccountMeta::new_readonly(pool.token_b_mint, false),
+
+            // 8. payer (user, signer)
+            AccountMeta::new(*user, true),
+
+            // 9. token_a_program (SPL Token o Token-2022)
+            AccountMeta::new_readonly(spl_token::id(), false),
+
+            // 10. token_b_program (SPL Token o Token-2022)
+            AccountMeta::new_readonly(spl_token::id(), false),
+
+            // 11. referral_token_account (opcional pero DEBE estar presente)
+            // Si no hay referral, usar la misma cuenta que output o Pubkey::default()
+            AccountMeta::new(*user_destination_token, false),
+
+            // 12. event_authority (PDA)
+            AccountMeta::new_readonly(event_authority, false),
+
+            // 13. program (el programa mismo)
+            AccountMeta::new_readonly(self.program_id, false),
+        ];
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data,
+        })
+    }
+
     /// Versión simplificada del swap usando solo las cuentas esenciales
     ///
-    /// Esta es una implementación mínima que puede funcionar
-    /// dependiendo de cómo esté configurado el programa
+    /// ADVERTENCIA: Esta versión está DESACTUALIZADA y puede fallar
+    /// USA build_complete_swap_instruction() en su lugar
+    #[deprecated(note = "Use build_complete_swap_instruction instead")]
     pub fn build_simple_swap_instruction(
         &self,
         pool_address: &Pubkey,

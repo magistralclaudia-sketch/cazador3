@@ -126,8 +126,8 @@ impl TradeExecutor {
         // Esto DEBE hacerse antes del swap o fallará
         self.ensure_ata_exists(&pool.token_b_mint).await?;
 
-        // Construir instrucción de swap
-        let swap_ix = self.swap_builder.build_simple_swap_instruction(
+        // ⚡ Construir instrucción de swap CON TODAS LAS CUENTAS REQUERIDAS (14)
+        let swap_ix = self.swap_builder.build_complete_swap_instruction(
             pool_address,
             pool,
             &self.wallet.pubkey(),

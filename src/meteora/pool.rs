@@ -1,5 +1,5 @@
-use anchor_lang::prelude::*;
 use borsh::{BorshDeserialize, BorshSerialize};
+use solana_sdk::pubkey::Pubkey;
 
 /// Meteora DAMM V2 Pool State
 /// Esta estructura representa el estado de un pool de Meteora DAMM V2

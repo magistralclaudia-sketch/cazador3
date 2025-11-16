@@ -4,22 +4,27 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Solana core (versiones compatibles con yellowstone-grpc 10.1)
-solana-sdk = "2.0"
-solana-client = "2.0"
-solana-transaction-status = "2.0"
+# Solana core 1.18 (compatible con tu instalación)
+solana-sdk = "1.18"
+solana-client = "1.18"
+solana-transaction-status = "1.18"
 
-# SPL Token
-spl-token = "6.0"
-spl-associated-token-account = "5.0"
+# SPL Token (versiones compatibles con Solana 1.18)
+spl-token = "4.0"
+spl-associated-token-account = "3.0"
 
-# Yellowstone gRPC for fastest pool monitoring
-yellowstone-grpc-client = "10.1"
-yellowstone-grpc-proto = "10.1"
+# Yellowstone gRPC v1.13 (compatible con Solana 1.18)
+# Nota: La versión del plugin puede ser diferente a la del cliente
+yellowstone-grpc-client = "1.13"
+yellowstone-grpc-proto = "1.13"
 
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
 futures = "0.3"
+
+# gRPC and networking
+tonic = "0.10"
+prost = "0.12"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -48,13 +53,5 @@ num-traits = "0.2"
 # SHA256 for calculating Anchor discriminators
 sha2 = "0.10"
 
-# Jito for MEV bundles
-jito-searcher-client = { version = "0.1", optional = true }
-
 [features]
 default = []
-jito = ["jito-searcher-client"]
-
-[patch.crates-io]
-# Patch para resolver conflictos de versiones en solana-sdk
-curve25519-dalek = "=3.2.1"

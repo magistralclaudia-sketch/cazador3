@@ -44,8 +44,8 @@ async fn main() -> Result<()> {
     let executor = Arc::new(TradeExecutor::new(config.clone()).await?);
     info!("✓ Wallet: {}", executor.get_wallet_pubkey());
 
-    // Crear position manager (clonamos el executor para pasar al manager)
-    let position_manager = PositionManager::new(config.clone(), executor.as_ref().clone());
+    // Crear position manager (clonamos el Arc que es barato)
+    let position_manager = PositionManager::new(config.clone(), executor.clone());
 
     // Crear Geyser client
     info!("🔌 Conectando a Geyser gRPC...");

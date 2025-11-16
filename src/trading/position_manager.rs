@@ -1,6 +1,7 @@
 use anyhow::Result;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{interval, Duration};
 use tracing::{info, warn};
@@ -53,11 +54,11 @@ impl Position {
 pub struct PositionManager {
     config: Config,
     positions: HashMap<Pubkey, Position>,
-    executor: TradeExecutor,
+    executor: Arc<TradeExecutor>,
 }
 
 impl PositionManager {
-    pub fn new(config: Config, executor: TradeExecutor) -> Self {
+    pub fn new(config: Config, executor: Arc<TradeExecutor>) -> Self {
         Self {
             config,
             positions: HashMap::new(),
@@ -87,7 +88,8 @@ impl PositionManager {
 
     /// Verificar todas las posiciones y ejecutar TP/SL si es necesario
     pub async fn check_positions(&mut self, pool_info: &PoolInfo) -> Result<()> {
-        if let Some(position) = self.positions.get(&pool_info.address) {
+        // Clonar la posición para evitar problemas con el borrow checker
+        if let Some(position) = self.positions.get(&pool_info.address).cloned() {
             let current_price = PriceCalculator::calculate_price(&pool_info.pool);
             let pnl = position.calculate_pnl(current_price);
 
@@ -96,12 +98,12 @@ impl PositionManager {
             // Verificar Take Profit
             if position.should_take_profit(current_price, self.config.take_profit_percent) {
                 info!("🎉 ¡TAKE PROFIT! PnL = {:.2}%", pnl);
-                self.execute_sell(pool_info, position, "Take Profit").await?;
+                self.execute_sell(pool_info, &position, "Take Profit").await?;
             }
             // Verificar Stop Loss
             else if position.should_stop_loss(current_price, self.config.stop_loss_percent) {
                 warn!("🛑 STOP LOSS activado. PnL = {:.2}%", pnl);
-                self.execute_sell(pool_info, position, "Stop Loss").await?;
+                self.execute_sell(pool_info, &position, "Stop Loss").await?;
             }
         }
 

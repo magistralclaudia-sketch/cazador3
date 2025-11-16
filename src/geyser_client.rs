@@ -2,10 +2,19 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use yellowstone_grpc_client::GeyserGrpcClient;
-use yellowstone_grpc_proto::prelude::*;
+use yellowstone_grpc_client::{GeyserGrpcClient, Interceptor};
+use yellowstone_grpc_proto::prelude::{
+    subscribe_update::UpdateOneof,
+    CommitmentLevel,
+    SubscribeRequest,
+    SubscribeRequestFilterAccounts,
+    SubscribeRequestFilterAccountsFilter,
+    SubscribeUpdateAccount,
+    subscribe_request_filter_accounts_filter,
+};
 
 use crate::config::Config;
 use crate::meteora::{Pool, PoolInfo};
@@ -18,31 +27,34 @@ pub enum PoolEvent {
 
 pub struct GeyserPoolMonitor {
     config: Config,
-    client: Option<GeyserGrpcClient<impl tonic::codegen::InterceptedService<
-        tonic::transport::Channel,
-        impl tonic::service::Interceptor,
-    >>>,
 }
 
 impl GeyserPoolMonitor {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            client: None,
         }
+    }
+
+    /// Conectar al servidor Geyser gRPC y retornar el cliente
+    async fn create_client(&self) -> Result<GeyserGrpcClient<impl Interceptor>> {
+        info!("Conectando a Geyser gRPC: {}", self.config.geyser_endpoint);
+
+        let client = GeyserGrpcClient::build_from_shared(self.config.geyser_endpoint.clone())?
+            .x_token(self.config.geyser_x_token.clone())?
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .max_decoding_message_size(1024 * 1024 * 1024)
+            .connect()
+            .await
+            .context("Failed to connect to Geyser gRPC")?;
+
+        Ok(client)
     }
 
     /// Conectar al servidor Geyser gRPC
     pub async fn connect(&mut self) -> Result<()> {
-        info!("Conectando a Geyser gRPC: {}", self.config.geyser_endpoint);
-
-        let mut client = GeyserGrpcClient::connect(
-            self.config.geyser_endpoint.clone(),
-            self.config.geyser_x_token.clone(),
-            None, // No TLS para conexión local
-        )
-        .await
-        .context("Failed to connect to Geyser gRPC")?;
+        let mut client = self.create_client().await?;
 
         // Verificar conexión con ping
         let _ = client
@@ -51,8 +63,6 @@ impl GeyserPoolMonitor {
             .context("Geyser ping failed")?;
 
         info!("✓ Conectado a Geyser gRPC exitosamente");
-
-        self.client = Some(client);
         Ok(())
     }
 
@@ -62,8 +72,8 @@ impl GeyserPoolMonitor {
     pub async fn monitor_pools(
         &mut self,
     ) -> Result<mpsc::UnboundedReceiver<PoolEvent>> {
-        let client = self.client.as_mut()
-            .context("Not connected to Geyser. Call connect() first")?;
+        // Crear un nuevo cliente
+        let mut client = self.create_client().await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -93,8 +103,7 @@ impl GeyserPoolMonitor {
         );
 
         // Crear request de subscripción
-        let mut request = HashMap::new();
-        request.insert("client".to_string(), SubscribeRequest {
+        let request = SubscribeRequest {
             accounts: accounts_filter,
             slots: HashMap::new(),
             transactions: HashMap::new(),
@@ -105,7 +114,7 @@ impl GeyserPoolMonitor {
             commitment: Some(CommitmentLevel::Confirmed as i32),
             accounts_data_slice: vec![],
             ping: None,
-        });
+        };
 
         info!("📡 Enviando subscripción a Geyser...");
 
