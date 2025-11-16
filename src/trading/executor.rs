@@ -232,13 +232,13 @@ impl TradeExecutor {
         );
         let user_sol_account = self.wallet.pubkey();
 
-        // Construir instrucción de swap
-        let swap_ix = self.swap_builder.build_simple_swap_instruction(
+        // ⚡ Construir instrucción de swap CON TODAS LAS CUENTAS REQUERIDAS (14)
+        let swap_ix = self.swap_builder.build_complete_swap_instruction(
             pool_address,
             pool,
             &self.wallet.pubkey(),
-            &user_token_account,
-            &user_sol_account,
+            &user_token_account,  // source: token que vendemos
+            &user_sol_account,    // destination: SOL que recibimos
             amount,
             minimum_amount_out,
         )?;
