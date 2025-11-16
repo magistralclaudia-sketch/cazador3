@@ -44,6 +44,9 @@ async fn main() -> Result<()> {
     let executor = Arc::new(TradeExecutor::new(config.clone()).await?);
     info!("✓ Wallet: {}", executor.get_wallet_pubkey());
 
+    // ⚡ Pre-crear ATAs para tokens comunes (ahorra ~500ms en primera compra)
+    executor.pre_create_common_atas().await?;
+
     // Crear position manager (clonamos el Arc que es barato)
     let position_manager = PositionManager::new(config.clone(), executor.clone());
 

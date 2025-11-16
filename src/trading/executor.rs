@@ -9,12 +9,14 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::meteora::{Pool, PriceCalculator};
 use super::blockhash_cache::BlockhashCache;
+use super::jito_bundle::JitoBundleSender;
 use super::swap_builder::{SwapInstructionBuilder, get_associated_token_address};
 use super::transaction_confirmer::TransactionConfirmer;
 
@@ -33,6 +35,7 @@ pub struct TradeExecutor {
     swap_builder: SwapInstructionBuilder,
     tx_confirmer: TransactionConfirmer,
     blockhash_cache: Arc<BlockhashCache>,
+    jito_bundle_sender: Option<JitoBundleSender>,
 }
 
 impl TradeExecutor {
@@ -72,6 +75,23 @@ impl TradeExecutor {
         blockhash_cache.force_refresh().await?;
         info!("✓ Blockhash cache inicializado con auto-refresh");
 
+        // ⚡ Jito Bundle Sender (opcional, para máxima velocidad)
+        let jito_bundle_sender = if config.jito_enabled {
+            if let Some(endpoint) = &config.jito_endpoint {
+                info!("⚡ Jito HABILITADO - Tip: {} lamports", config.jito_tip_lamports);
+                info!("   Endpoint: {}", endpoint);
+                Some(JitoBundleSender::new(
+                    endpoint.clone(),
+                    config.jito_tip_lamports,
+                ))
+            } else {
+                warn!("⚠️  Jito habilitado pero sin endpoint configurado");
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             rpc_client,
@@ -79,6 +99,7 @@ impl TradeExecutor {
             swap_builder,
             tx_confirmer,
             blockhash_cache,
+            jito_bundle_sender,
         })
     }
 
@@ -232,15 +253,51 @@ impl TradeExecutor {
         swap_ix: Instruction,
         operation_name: &str,
     ) -> Result<Signature> {
+        // ⚡ Obtener blockhash del cache (ahorra 10-50ms)
+        let recent_blockhash = self.blockhash_cache.get_blockhash().await?;
+
+        // ⚡⚡⚡ JITO: Ultra-fast execution (~100-300ms vs ~1-2s)
+        if let Some(jito_sender) = &self.jito_bundle_sender {
+            info!("⚡ Usando Jito bundle para {}", operation_name);
+
+            // Construir transacción de swap (SIN priority fees, Jito no los usa)
+            let compute_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(300_000);
+
+            let swap_tx = Transaction::new_signed_with_payer(
+                &[compute_limit_ix, swap_ix],
+                Some(&self.wallet.pubkey()),
+                &[&*self.wallet],
+                recent_blockhash,
+            );
+
+            // Crear transacción de tip a Jito
+            let tip_tx = jito_sender.create_tip_transaction(
+                &*self.wallet,
+                recent_blockhash,
+                self.config.jito_tip_lamports,
+            );
+
+            // Enviar bundle (swap + tip)
+            let bundle_id = jito_sender
+                .send_bundle(&swap_tx, &tip_tx)
+                .await
+                .context("Failed to send Jito bundle")?;
+
+            info!("📦 Bundle ID: {}", bundle_id);
+
+            // Retornar signature del swap
+            return Ok(swap_tx.signatures[0]);
+        }
+
+        // 🐢 Método tradicional (fallback si Jito no está habilitado)
+        info!("🐢 Usando método tradicional para {}", operation_name);
+
         // Priority fees para ejecución rápida
         let compute_budget_ix = ComputeBudgetInstruction::set_compute_unit_price(
             self.config.priority_fee_lamports,
         );
 
         let compute_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(300_000);
-
-        // ⚡ Obtener blockhash del cache (ahorra 10-50ms)
-        let recent_blockhash = self.blockhash_cache.get_blockhash().await?;
 
         // Construir transacción
         let tx = Transaction::new_signed_with_payer(
@@ -250,7 +307,7 @@ impl TradeExecutor {
             recent_blockhash,
         );
 
-        // ⚡ Enviar y confirmar con máxima velocidad (sin logs para velocidad)
+        // Enviar y confirmar con reintentos
         let signature = self.tx_confirmer
             .send_with_retries(&tx)
             .await
@@ -308,6 +365,85 @@ impl TradeExecutor {
 
     pub fn get_wallet_pubkey(&self) -> Pubkey {
         self.wallet.pubkey()
+    }
+
+    /// Pre-crear ATAs para tokens comunes
+    ///
+    /// Esto elimina el delay de ~500ms en la primera compra de estos tokens.
+    /// Los tokens comunes en Meteora incluyen: WSOL, USDC, USDT, etc.
+    pub async fn pre_create_common_atas(&self) -> Result<()> {
+        info!("🔧 Pre-creando ATAs para tokens comunes...");
+
+        // Tokens comunes en Meteora pools
+        let common_tokens = vec![
+            // WSOL (Wrapped SOL)
+            ("WSOL", "So11111111111111111111111111111111111111112"),
+            // USDC
+            ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+            // USDT
+            ("USDT", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"),
+            // RAY (Raydium)
+            ("RAY", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"),
+            // BONK
+            ("BONK", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"),
+        ];
+
+        let mut created_count = 0;
+        let mut already_exists_count = 0;
+
+        for (name, mint_str) in common_tokens {
+            match Pubkey::from_str(mint_str) {
+                Ok(mint) => {
+                    let ata = get_associated_token_address(&self.wallet.pubkey(), &mint);
+
+                    // Verificar si ya existe
+                    match self.rpc_client.get_account(&ata).await {
+                        Ok(_) => {
+                            already_exists_count += 1;
+                        }
+                        Err(_) => {
+                            // No existe, crearla
+                            info!("   📝 Creando ATA para {}", name);
+
+                            let create_ata_ix = spl_associated_token_account::instruction::create_associated_token_account(
+                                &self.wallet.pubkey(),
+                                &self.wallet.pubkey(),
+                                &mint,
+                                &spl_token::id(),
+                            );
+
+                            let blockhash = self.blockhash_cache.get_blockhash().await?;
+
+                            let create_tx = Transaction::new_signed_with_payer(
+                                &[create_ata_ix],
+                                Some(&self.wallet.pubkey()),
+                                &[&*self.wallet],
+                                blockhash,
+                            );
+
+                            match self.tx_confirmer.send_and_confirm_ultra_fast(&create_tx).await {
+                                Ok(_) => {
+                                    info!("   ✓ ATA creada para {}", name);
+                                    created_count += 1;
+                                }
+                                Err(e) => {
+                                    warn!("   ⚠️  Error creando ATA para {}: {:?}", name, e);
+                                }
+                            }
+
+                            // Pequeña pausa para no saturar el RPC
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("   ⚠️  Pubkey inválida para {}: {:?}", name, e);
+                }
+            }
+        }
+
+        info!("✓ ATAs pre-creadas: {} nuevas, {} ya existían", created_count, already_exists_count);
+        Ok(())
     }
 }
 

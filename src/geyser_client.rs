@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -126,9 +127,10 @@ impl GeyserPoolMonitor {
 
         info!("✓ Subscripción activa. Esperando nuevos pools...");
 
-        // Procesar stream en task separado para no bloquear
+        // ⚡ Procesar stream en task separado para no bloquear
         tokio::spawn(async move {
-            let mut pool_cache: HashMap<Pubkey, Pool> = HashMap::new();
+            // Usar Arc para compartir el cache entre tasks
+            let pool_cache = Arc::new(std::sync::RwLock::new(HashMap::<Pubkey, Pool>::new()));
 
             while let Some(message) = stream.next().await {
                 match message {
@@ -136,11 +138,18 @@ impl GeyserPoolMonitor {
                         if let Some(update) = msg.update_oneof {
                             match update {
                                 UpdateOneof::Account(account_update) => {
-                                    Self::process_account_update(
-                                        account_update,
-                                        &mut pool_cache,
-                                        &tx,
-                                    );
+                                    // ⚡ PARALELIZACIÓN: Procesar cada evento en su propio task
+                                    // Esto evita que un evento lento bloquee los siguientes
+                                    let tx_clone = tx.clone();
+                                    let cache_clone = pool_cache.clone();
+
+                                    tokio::spawn(async move {
+                                        Self::process_account_update_parallel(
+                                            account_update,
+                                            cache_clone,
+                                            tx_clone,
+                                        );
+                                    });
                                 }
                                 UpdateOneof::Ping(_) => {
                                     debug!("Received ping from Geyser");
@@ -162,11 +171,11 @@ impl GeyserPoolMonitor {
         Ok(rx)
     }
 
-    /// Procesar actualización de cuenta
-    fn process_account_update(
+    /// Procesar actualización de cuenta (versión paralelizada)
+    fn process_account_update_parallel(
         account_update: SubscribeUpdateAccount,
-        pool_cache: &mut HashMap<Pubkey, Pool>,
-        tx: &mpsc::UnboundedSender<PoolEvent>,
+        pool_cache: Arc<std::sync::RwLock<HashMap<Pubkey, Pool>>>,
+        tx: mpsc::UnboundedSender<PoolEvent>,
     ) {
         let account_info = match account_update.account {
             Some(acc) => acc,
@@ -191,31 +200,40 @@ impl GeyserPoolMonitor {
             }
         };
 
-        // Verificar si es nuevo pool o actualización
-        let event = if let Some(old_pool) = pool_cache.get(&pubkey) {
-            // Pool existente actualizado
-            if old_pool.sqrt_price != pool.sqrt_price {
-                debug!("Pool actualizado: {}", pubkey);
-                PoolEvent::PoolUpdated(PoolInfo::new(pubkey, pool.clone()))
+        // Verificar si es nuevo pool o actualización (con lock de lectura)
+        let event = {
+            let cache_read = pool_cache.read().unwrap();
+            if let Some(old_pool) = cache_read.get(&pubkey) {
+                // Pool existente actualizado
+                if old_pool.sqrt_price != pool.sqrt_price {
+                    debug!("Pool actualizado: {}", pubkey);
+                    Some(PoolEvent::PoolUpdated(PoolInfo::new(pubkey, pool.clone())))
+                } else {
+                    // Sin cambios relevantes
+                    None
+                }
             } else {
-                // Sin cambios relevantes
-                return;
+                // Nuevo pool detectado!
+                info!("🆕 ¡NUEVO POOL DETECTADO! {}", pubkey);
+                info!("   Token A: {}", pool.token_a_mint);
+                info!("   Token B: {}", pool.token_b_mint);
+                info!("   Liquidez: {}", pool.liquidity);
+                Some(PoolEvent::NewPool(PoolInfo::new(pubkey, pool.clone())))
             }
-        } else {
-            // Nuevo pool detectado!
-            info!("🆕 ¡NUEVO POOL DETECTADO! {}", pubkey);
-            info!("   Token A: {}", pool.token_a_mint);
-            info!("   Token B: {}", pool.token_b_mint);
-            info!("   Liquidez: {}", pool.liquidity);
-            PoolEvent::NewPool(PoolInfo::new(pubkey, pool.clone()))
         };
 
-        // Actualizar cache
-        pool_cache.insert(pubkey, pool);
+        // Si hay un evento, actualizar cache y enviarlo
+        if let Some(event) = event {
+            // Actualizar cache (con lock de escritura)
+            {
+                let mut cache_write = pool_cache.write().unwrap();
+                cache_write.insert(pubkey, pool);
+            }
 
-        // Enviar evento
-        if let Err(e) = tx.send(event) {
-            error!("Failed to send pool event: {:?}", e);
+            // Enviar evento
+            if let Err(e) = tx.send(event) {
+                error!("Failed to send pool event: {:?}", e);
+            }
         }
     }
 }

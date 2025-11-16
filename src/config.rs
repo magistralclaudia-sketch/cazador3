@@ -32,6 +32,11 @@ pub struct Config {
 
     // Monitoring
     pub min_liquidity_sol: f64,
+
+    // Jito Configuration (optional, for ultra-fast execution)
+    pub jito_enabled: bool,
+    pub jito_endpoint: Option<String>,
+    pub jito_tip_lamports: u64,
 }
 
 impl Config {
@@ -53,6 +58,13 @@ impl Config {
             take_profit_percent: std::env::var("TAKE_PROFIT_PERCENT")?.parse()?,
             stop_loss_percent: std::env::var("STOP_LOSS_PERCENT")?.parse()?,
             min_liquidity_sol: std::env::var("MIN_LIQUIDITY_SOL")?.parse()?,
+            jito_enabled: std::env::var("JITO_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()?,
+            jito_endpoint: std::env::var("JITO_ENDPOINT").ok(),
+            jito_tip_lamports: std::env::var("JITO_TIP_LAMPORTS")
+                .unwrap_or_else(|_| "10000".to_string())
+                .parse()?,
         };
 
         Ok(config)
