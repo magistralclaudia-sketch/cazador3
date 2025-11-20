@@ -14,10 +14,10 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
-use crate::meteora::{Pool, PriceCalculator};
+use crate::meteora::{Pool, LbPair, PriceCalculator, DammSwapBuilder, DlmmSwapBuilder};
 use super::blockhash_cache::BlockhashCache;
 use super::jito_bundle::JitoBundleSender;
-use super::swap_builder::{SwapInstructionBuilder, get_associated_token_address};
+use super::swap_builder::get_associated_token_address;
 use super::transaction_confirmer::TransactionConfirmer;
 
 /// Executor de trades ultra-rápido para Meteora DAMM V2
@@ -32,7 +32,8 @@ pub struct TradeExecutor {
     config: Config,
     rpc_client: Arc<AsyncRpcClient>,
     wallet: Arc<Keypair>,
-    swap_builder: SwapInstructionBuilder,
+    damm_swap_builder: DammSwapBuilder,
+    dlmm_swap_builder: DlmmSwapBuilder,
     tx_confirmer: TransactionConfirmer,
     blockhash_cache: Arc<BlockhashCache>,
     jito_bundle_sender: Option<JitoBundleSender>,
@@ -49,8 +50,9 @@ impl TradeExecutor {
 
         info!("💼 Wallet cargada: {}", wallet.pubkey());
 
-        // Swap builder
-        let swap_builder = SwapInstructionBuilder::new(config.meteora_program_id);
+        // Swap builders para DAMM V2 y DLMM
+        let damm_swap_builder = DammSwapBuilder::new()?;
+        let dlmm_swap_builder = DlmmSwapBuilder::new()?;
 
         // Transaction confirmer con configuración ultra-rápida
         let tx_confirmer = TransactionConfirmer::new(
@@ -96,7 +98,8 @@ impl TradeExecutor {
             config,
             rpc_client,
             wallet,
-            swap_builder,
+            damm_swap_builder,
+            dlmm_swap_builder,
             tx_confirmer,
             blockhash_cache,
             jito_bundle_sender,
@@ -117,55 +120,41 @@ impl TradeExecutor {
     /// 🎯 SNIPE BUY - Compra ultra-rápida en nuevo pool
     ///
     /// Optimizaciones:
-    /// - Creación automática de ATA si no existe
-    /// - Skip preflight para máxima velocidad
+    /// - Usa DammSwapBuilder oficial con wrapping de SOL
+    /// - Creación idempotente de ATAs (no falla si ya existen)
+    /// - Wrapping automático SOL -> WSOL
+    /// - Unwrapping automático para recuperar SOL sobrante
     /// - Priority fees altos
     /// - Confirmación agresiva
-    /// - Construcción optimizada de instrucciones
     pub async fn snipe_buy(
         &self,
         pool_address: &Pubkey,
         pool: &Pool,
     ) -> Result<Signature> {
-        info!("   [1/4] Calculando amounts...");
-        // Calcular amounts
+        info!("   [1/3] Calculando amounts...");
         let amount_in_lamports = (self.config.auto_buy_amount_sol * 1_000_000_000.0) as u64;
         let minimum_amount_out = self.calculate_min_amount_out(
             amount_in_lamports,
             pool,
             true, // SOL -> Token
-            self.config.buy_slippage_bps, // 99% slippage para compra
+            self.config.buy_slippage_bps,
         );
         info!("      In: {} lamports, Min out: {}", amount_in_lamports, minimum_amount_out);
 
-        // Obtener cuentas
-        let user_sol_account = self.wallet.pubkey();
-        let user_token_account = get_associated_token_address(
-            &self.wallet.pubkey(),
-            &pool.token_b_mint,
-        );
-        info!("      Token account: {}", user_token_account);
-
-        info!("   [2/4] Verificando/creando ATA...");
-        // ⚡ CRÍTICO: Verificar y crear ATA si no existe
-        self.ensure_ata_exists(&pool.token_b_mint).await?;
-
-        info!("   [3/4] Construyendo swap instruction (14 cuentas)...");
-        // ⚡ Construir instrucción de swap CON TODAS LAS CUENTAS REQUERIDAS (14)
-        let swap_ix = self.swap_builder.build_complete_swap_instruction(
+        info!("   [2/3] Construyendo instrucciones completas (ATAs + wrap + swap + unwrap)...");
+        // ⚡ Usar DammSwapBuilder que maneja TODO automáticamente
+        let instructions = self.damm_swap_builder.build_buy_instructions_with_atas(
             pool_address,
             pool,
             &self.wallet.pubkey(),
-            &user_sol_account,
-            &user_token_account,
             amount_in_lamports,
             minimum_amount_out,
         )?;
-        info!("      ✅ Instruction construida correctamente");
+        info!("      ✅ {} instrucciones construidas", instructions.len());
 
-        info!("   [4/4] Ejecutando transacción...");
-        // Ejecutar transacción ultra-rápida
-        self.execute_swap_transaction(swap_ix, "COMPRA").await
+        info!("   [3/3] Ejecutando transacción...");
+        // Ejecutar todas las instrucciones en una transacción
+        self.execute_multi_instruction_transaction(instructions, "COMPRA").await
     }
 
     /// Asegurar que la Associated Token Account existe
@@ -218,47 +207,158 @@ impl TradeExecutor {
         }
     }
 
-    /// 💸 SELL - Venta ultra-rápida
+    /// 💸 SELL - Venta ultra-rápida (Token -> SOL)
+    ///
+    /// NOTA: Por ahora solo implementamos compra. Para venta completa necesitamos
+    /// implementar build_sell_instruction en DammSwapBuilder.
     pub async fn sell(
         &self,
-        pool_address: &Pubkey,
-        pool: &Pool,
-        amount: u64,
+        _pool_address: &Pubkey,
+        _pool: &Pool,
+        _amount: u64,
     ) -> Result<Signature> {
-        info!("💸 EJECUTANDO VENTA en pool {}", pool_address);
+        // TODO: Implementar venta con DammSwapBuilder
+        // Por ahora, retornar error hasta que lo implementemos
+        anyhow::bail!("Sell functionality not yet implemented with DammSwapBuilder")
+    }
 
-        info!("   [1/3] Calculando amounts...");
-        let minimum_amount_out = self.calculate_min_amount_out(
-            amount,
+    /// 🎯 SNIPE BUY DLMM - Compra ultra-rápida en pool DLMM
+    ///
+    /// Similar a snipe_buy pero para pools DLMM
+    pub async fn snipe_buy_dlmm(
+        &self,
+        pool_address: &Pubkey,
+        pool: &LbPair,
+    ) -> Result<Signature> {
+        info!("   [1/3] Calculando amounts para DLMM...");
+        let amount_in_lamports = (self.config.auto_buy_amount_sol * 1_000_000_000.0) as u64;
+
+        // Para DLMM usamos un cálculo simple de slippage basado en el monto
+        // TODO: Mejorar esto con cálculo real basado en bins activos
+        let minimum_amount_out = self.calculate_min_amount_out_dlmm(
+            amount_in_lamports,
             pool,
-            false, // Token -> SOL
-            self.config.sell_slippage_bps, // 30% slippage para venta
+            self.config.buy_slippage_bps,
         );
-        info!("      In: {} tokens, Min out: {} lamports", amount, minimum_amount_out);
+        info!("      In: {} lamports, Min out: {}", amount_in_lamports, minimum_amount_out);
 
-        info!("   [2/3] Construyendo swap instruction (14 cuentas)...");
-        // Cuentas de token
-        let user_token_account = get_associated_token_address(
-            &self.wallet.pubkey(),
-            &pool.token_b_mint,
-        );
-        let user_sol_account = self.wallet.pubkey();
-
-        // ⚡ Construir instrucción de swap CON TODAS LAS CUENTAS REQUERIDAS (14)
-        let swap_ix = self.swap_builder.build_complete_swap_instruction(
+        info!("   [2/3] Construyendo instrucciones DLMM (ATAs + wrap + swap + unwrap)...");
+        let instructions = self.dlmm_swap_builder.build_buy_instructions_with_atas(
             pool_address,
             pool,
             &self.wallet.pubkey(),
-            &user_token_account,  // source: token que vendemos
-            &user_sol_account,    // destination: SOL que recibimos
-            amount,
+            amount_in_lamports,
             minimum_amount_out,
         )?;
-        info!("      ✅ Instruction construida correctamente");
+        info!("      ✅ {} instrucciones construidas", instructions.len());
 
-        // Ejecutar transacción
-        info!("   [3/3] Ejecutando transacción...");
-        self.execute_swap_transaction(swap_ix, "VENTA").await
+        info!("   [3/3] Ejecutando transacción DLMM...");
+        self.execute_multi_instruction_transaction(instructions, "COMPRA DLMM").await
+    }
+
+    /// 💸 SELL DLMM - Venta ultra-rápida en pool DLMM (Token -> SOL)
+    pub async fn sell_dlmm(
+        &self,
+        pool_address: &Pubkey,
+        pool: &LbPair,
+        amount_token: u64,
+    ) -> Result<Signature> {
+        info!("   [1/3] Calculando amounts para venta DLMM...");
+
+        let minimum_sol_out = self.calculate_min_sol_out_dlmm(
+            amount_token,
+            pool,
+            self.config.sell_slippage_bps,
+        );
+        info!("      In: {} tokens, Min out: {} lamports", amount_token, minimum_sol_out);
+
+        info!("   [2/3] Construyendo instrucciones de venta DLMM...");
+        let instructions = self.dlmm_swap_builder.build_sell_instructions_with_atas(
+            pool_address,
+            pool,
+            &self.wallet.pubkey(),
+            amount_token,
+            minimum_sol_out,
+        )?;
+        info!("      ✅ {} instrucciones construidas", instructions.len());
+
+        info!("   [3/3] Ejecutando transacción de venta DLMM...");
+        self.execute_multi_instruction_transaction(instructions, "VENTA DLMM").await
+    }
+
+    /// Ejecutar transacción con múltiples instrucciones (para ATAs + swap)
+    async fn execute_multi_instruction_transaction(
+        &self,
+        instructions: Vec<Instruction>,
+        operation_name: &str,
+    ) -> Result<Signature> {
+        // ⚡ Obtener blockhash del cache (ahorra 10-50ms)
+        let recent_blockhash = self.blockhash_cache.get_blockhash().await?;
+
+        // ⚡⚡⚡ JITO: Ultra-fast execution (~100-300ms vs ~1-2s)
+        if let Some(jito_sender) = &self.jito_bundle_sender {
+            info!("⚡ Usando Jito bundle para {}", operation_name);
+
+            // Construir transacción con todas las instrucciones
+            let compute_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(500_000); // Más CU para múltiples instrucciones
+
+            let mut all_ixs = vec![compute_limit_ix];
+            all_ixs.extend(instructions);
+
+            let tx = Transaction::new_signed_with_payer(
+                &all_ixs,
+                Some(&self.wallet.pubkey()),
+                &[&*self.wallet],
+                recent_blockhash,
+            );
+
+            // Crear transacción de tip a Jito
+            let tip_tx = jito_sender.create_tip_transaction(
+                &*self.wallet,
+                recent_blockhash,
+                self.config.jito_tip_lamports,
+            );
+
+            // Enviar bundle
+            let bundle_id = jito_sender
+                .send_bundle(&tx, &tip_tx)
+                .await
+                .context("Failed to send Jito bundle")?;
+
+            info!("📦 Bundle ID: {}", bundle_id);
+
+            // Retornar signature
+            return Ok(tx.signatures[0]);
+        }
+
+        // 🐢 Método tradicional (fallback si Jito no está habilitado)
+        info!("🐢 Usando método tradicional para {}", operation_name);
+
+        // Priority fees
+        let compute_budget_ix = ComputeBudgetInstruction::set_compute_unit_price(
+            self.config.priority_fee_lamports,
+        );
+
+        let compute_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(500_000);
+
+        // Construir transacción con todas las instrucciones
+        let mut all_ixs = vec![compute_budget_ix, compute_limit_ix];
+        all_ixs.extend(instructions);
+
+        let tx = Transaction::new_signed_with_payer(
+            &all_ixs,
+            Some(&self.wallet.pubkey()),
+            &[&*self.wallet],
+            recent_blockhash,
+        );
+
+        // Enviar y confirmar con reintentos
+        let signature = self.tx_confirmer
+            .send_with_retries(&tx)
+            .await
+            .context(format!("Failed to execute {}", operation_name))?;
+
+        Ok(signature)
     }
 
     /// Ejecutar transacción de swap con máxima velocidad
@@ -341,6 +441,54 @@ impl TradeExecutor {
 
         info!("   📈 Estimated output: {}", estimated_out);
         info!("   📉 Min output ({}% slippage): {}",
+            slippage_bps as f64 / 100.0,
+            min_out
+        );
+
+        min_out
+    }
+
+    /// Calcular minimum amount out para DLMM con slippage protection
+    fn calculate_min_amount_out_dlmm(&self, amount_in_lamports: u64, pool: &LbPair, slippage_bps: u16) -> u64 {
+        // ESTRATEGIA NUEVA PARA SNIPER BOT:
+        // NO calcular precio con fórmula exponencial (da NaN para active_id extremos).
+        // El programa DLMM calcula el precio real internamente mirando balances en el bin.
+        //
+        // Para un sniper bot que quiere entrar RÁPIDO, usamos min_amount_out = 1
+        // para permitir cualquier swap. Aceptamos el riesgo de slippage a cambio de velocidad.
+
+        info!("   ⚡ SNIPER MODE: min_amount_out = 1 (acepta cualquier precio)");
+
+        1 // Aceptar cualquier output amount
+    }
+
+    /// Calcular minimum SOL out para venta DLMM
+    fn calculate_min_sol_out_dlmm(&self, amount_token_in: u64, pool: &LbPair, slippage_bps: u16) -> u64 {
+        let price = pool.get_price();
+
+        let wsol_mint = "So11111111111111111111111111111111111111112".parse::<Pubkey>().unwrap();
+        let native_sol_mint = solana_sdk::system_program::ID;
+        let is_x_to_y = pool.token_x_mint == wsol_mint || pool.token_x_mint == native_sol_mint;
+
+        let amount_token = amount_token_in as f64 / 1_000_000.0; // Asumimos 6 decimales
+
+        let estimated_sol_out = if is_x_to_y {
+            // Vendemos Y por X (SOL), multiplicamos por el precio
+            amount_token * price
+        } else {
+            // Vendemos X por Y (SOL), dividimos por el precio
+            amount_token / price
+        };
+
+        let estimated_out_lamports = (estimated_sol_out * 1_000_000_000.0) as u64;
+
+        // Aplicar slippage tolerance
+        let slippage_multiplier = 1.0 - (slippage_bps as f64 / 10_000.0);
+        let min_out = (estimated_out_lamports as f64 * slippage_multiplier) as u64;
+
+        info!("   📈 DLMM Price: {}", price);
+        info!("   📈 Estimated SOL output: {} ({} lamports)", estimated_sol_out, estimated_out_lamports);
+        info!("   📉 Min output ({}% slippage): {} lamports",
             slippage_bps as f64 / 100.0,
             min_out
         );

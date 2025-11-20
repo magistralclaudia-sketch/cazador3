@@ -95,16 +95,18 @@ impl SwapInstructionBuilder {
             AccountMeta::new(pool.token_a_vault, false),  // Placeholder
             AccountMeta::new(pool.token_b_vault, false),  // Placeholder
 
-            // 8-9. LP mints
-            AccountMeta::new_readonly(pool.pool_token_mint, false),
-            AccountMeta::new_readonly(pool.pool_token_mint, false),  // Placeholder
+            // 8-9. LP mints - NO EXISTEN EN DAMM V2 (constant product AMM)
+            // AccountMeta::new_readonly(pool.pool_token_mint, false),
+            // AccountMeta::new_readonly(pool.pool_token_mint, false),  // Placeholder
+            AccountMeta::new(pool.token_a_vault, false),  // Placeholder - FIXME
+            AccountMeta::new(pool.token_b_vault, false),  // Placeholder - FIXME
 
-            // 10-11. LP accounts
-            AccountMeta::new(pool.token_a_vault, false),  // Placeholder
-            AccountMeta::new(pool.token_b_vault, false),  // Placeholder
+            // 10-11. LP accounts - NO EXISTEN EN DAMM V2
+            AccountMeta::new(pool.token_a_vault, false),  // Placeholder - FIXME
+            AccountMeta::new(pool.token_b_vault, false),  // Placeholder - FIXME
 
-            // 12. Protocol fee receiver (mut)
-            AccountMeta::new(pool.fee_receiver, false),
+            // 12. Protocol fee receiver (mut) - TEMPORAL: usar creator
+            AccountMeta::new(pool.creator, false),  // FIXME: should be protocol fee receiver
 
             // 13. User (signer)
             AccountMeta::new(*user, true),
@@ -208,7 +210,7 @@ impl SwapInstructionBuilder {
             // 7. token_b_mint
             AccountMeta::new_readonly(pool.token_b_mint, false),
 
-            // 8. payer (user, signer)
+            // 8. payer (user, signer) - WRITABLE
             AccountMeta::new(*user, true),
 
             // 9. token_a_program (SPL Token o Token-2022)
